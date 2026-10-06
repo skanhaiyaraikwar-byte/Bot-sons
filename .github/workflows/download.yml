@@ -1,0 +1,100 @@
+name: Auto Download Songs and Create Release
+
+on:
+  workflow_dispatch: # मैन्युअल 'Run workflow' बटन के लिए
+
+permissions:
+  contents: write # Release बनाने और फ़ाइलें अपलोड करने की अनुमति
+
+jobs:
+  download-and-release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python & System Tools
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install Dependencies
+        run: |
+          sudo apt update -y
+          sudo apt install ffmpeg nodejs -y
+          pip install yt-dlp requests
+
+      - name: Download and Compress Playlists
+        run: |
+          mkdir -p raw_songs
+          mkdir -p final_songs
+
+          # आपकी दी हुई तीनों प्लेलिस्ट लिंक्स
+          PLAYLISTS=(
+            "https://youtube.com/playlist?list=PLPsY3qQTccbo&si=i1RoJO748GjkO1Ic"
+            "https://youtube.com/playlist?list=PL26mPvbpVauhgMfjN_J5DbRUssnCfl6qi&si=PUPLOpIUySW9k-TD"
+            "https://music.youtube.com/playlist?list=PLA_WrO8gHnFU3bSxkJwDIVyP1cmlhowLN"
+          )
+
+          for url in "${PLAYLISTS[@]}"; do
+            echo "Downloading playlist: $url"
+            yt-dlp -i -x --audio-format mp3 \
+              --extractor-args "youtube:player_client=android,ios" \
+              --sleep-interval 1 --max-sleep-interval 2 \
+              -o "raw_songs/%(title)s.%(ext)s" "$url" || true
+          done
+
+          echo "Compressing songs to 64kbps MP3 (Ultra-light for Bot)..."
+          for file in raw_songs/*.mp3; do
+            if [ -f "$file" ]; then
+              base_name=$(basename "$file")
+              # नाम से अजीब कैरेक्टर साफ करना ताकि URL सही बने
+              clean_name=$(echo "$base_name" | tr -cd 'A-Za-z0-9._-')
+              if [ -z "$clean_name" ]; then
+                clean_name="song_${RANDOM}.mp3"
+              fi
+              ffmpeg -i "$file" -b:a 64k -vn "final_songs/$clean_name" -y
+            fi
+          done
+
+      - name: Generate Direct Streaming Links File
+        run: |
+          TAG_NAME="v1.0"
+          REPO="${{ github.repository }}"
+          echo "# Direct Song Streaming URLs" > songs_list.txt
+          echo "{" > songs.json
+
+          count=1
+          total=$(ls -1 final_songs/*.mp3 2>/dev/null | wc -l)
+          for song in final_songs/*.mp3; do
+            if [ -f "$song" ]; then
+              file_name=$(basename "$song")
+              direct_url="https://github.com/$REPO/releases/download/$TAG_NAME/$file_name"
+              echo "$file_name -> $direct_url" >> songs_list.txt
+
+              if [ $count -eq $total ]; then
+                echo "  \"$count\": {\"title\": \"$file_name\", \"url\": \"$direct_url\"}" >> songs.json
+              else
+                echo "  \"$count\": {\"title\": \"$file_name\", \"url\": \"$direct_url\"}," >> songs.json
+              fi
+              count=$((count+1))
+            fi
+          done
+          echo "}" >> songs.json
+
+          # लिंक्स की फाइल्स को भी रिलीज में शामिल करना
+          cp songs_list.txt songs.json final_songs/
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: "v1.0"
+          name: "Bot Songs Collection (64kbps)"
+          body: "All songs downloaded and optimized for Telegram Music Bot."
+          draft: false
+          prerelease: false
+          files: final_songs/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          
